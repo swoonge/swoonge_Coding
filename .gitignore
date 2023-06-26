@@ -1,3 +1,4 @@
 GNN/datasets*
 Computer Vision/datasets*
 ML/datasets*
+*.pyc
