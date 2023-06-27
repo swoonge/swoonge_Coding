@@ -1,70 +1,112 @@
-import networkx as nx
-import numpy as np
+import sys
 import os
-import pickle
-import torch
+
+from collections import defaultdict
+import numpy as np
+
+class DataCenter(object):
+	"""docstring for DataCenter"""
+	def __init__(self, config):
+		super(DataCenter, self).__init__()
+		self.config = config
+		
+	def load_dataSet(self, dataSet='cora'):
+		if dataSet == 'cora':
+			cora_content_file = self.config['file_path.cora_content']
+			cora_cite_file = self.config['file_path.cora_cite']
+
+			feat_data = []
+			labels = [] # label sequence of node
+			node_map = {} # map node to Node_ID
+			label_map = {} # map label to Label_ID
+			with open(cora_content_file) as fp:
+				for i,line in enumerate(fp):
+					info = line.strip().split()
+					feat_data.append([float(x) for x in info[1:-1]])
+					node_map[info[0]] = i
+					if not info[-1] in label_map:
+						label_map[info[-1]] = len(label_map)
+					labels.append(label_map[info[-1]])
+			feat_data = np.asarray(feat_data)
+			labels = np.asarray(labels, dtype=np.int64)
+			
+			adj_lists = defaultdict(set)
+			with open(cora_cite_file) as fp:
+				for i,line in enumerate(fp):
+					info = line.strip().split()
+					assert len(info) == 2
+					paper1 = node_map[info[0]]
+					paper2 = node_map[info[1]]
+					adj_lists[paper1].add(paper2)
+					adj_lists[paper2].add(paper1)
+
+			assert len(feat_data) == len(labels) == len(adj_lists)
+			test_indexs, val_indexs, train_indexs = self._split_data(feat_data.shape[0])
+
+			setattr(self, dataSet+'_test', test_indexs)
+			setattr(self, dataSet+'_val', val_indexs)
+			setattr(self, dataSet+'_train', train_indexs)
+
+			setattr(self, dataSet+'_feats', feat_data)
+			setattr(self, dataSet+'_labels', labels)
+			setattr(self, dataSet+'_adj_lists', adj_lists)
+
+		elif dataSet == 'pubmed':
+			pubmed_content_file = self.config['file_path.pubmed_paper']
+			pubmed_cite_file = self.config['file_path.pubmed_cites']
+
+			feat_data = []
+			labels = [] # label sequence of node
+			node_map = {} # map node to Node_ID
+			with open(pubmed_content_file) as fp:
+				fp.readline()
+				feat_map = {entry.split(":")[1]:i-1 for i,entry in enumerate(fp.readline().split("\t"))}
+				for i, line in enumerate(fp):
+					info = line.split("\t")
+					node_map[info[0]] = i
+					labels.append(int(info[1].split("=")[1])-1)
+					tmp_list = np.zeros(len(feat_map)-2)
+					for word_info in info[2:-1]:
+						word_info = word_info.split("=")
+						tmp_list[feat_map[word_info[0]]] = float(word_info[1])
+					feat_data.append(tmp_list)
+			
+			feat_data = np.asarray(feat_data)
+			labels = np.asarray(labels, dtype=np.int64)
+			
+			adj_lists = defaultdict(set)
+			with open(pubmed_cite_file) as fp:
+				fp.readline()
+				fp.readline()
+				for line in fp:
+					info = line.strip().split("\t")
+					paper1 = node_map[info[1].split(":")[1]]
+					paper2 = node_map[info[-1].split(":")[1]]
+					adj_lists[paper1].add(paper2)
+					adj_lists[paper2].add(paper1)
+			
+			assert len(feat_data) == len(labels) == len(adj_lists)
+			test_indexs, val_indexs, train_indexs = self._split_data(feat_data.shape[0])
+
+			setattr(self, dataSet+'_test', test_indexs)
+			setattr(self, dataSet+'_val', val_indexs)
+			setattr(self, dataSet+'_train', train_indexs)
+
+			setattr(self, dataSet+'_feats', feat_data)
+			setattr(self, dataSet+'_labels', labels)
+			setattr(self, dataSet+'_adj_lists', adj_lists)
 
 
-def process_features(features):
-    row_sum_diag = np.sum(features, axis=1)
-    row_sum_diag_inv = np.power(row_sum_diag, -1)
-    row_sum_diag_inv[np.isinf(row_sum_diag_inv)] = 0.
-    row_sum_inv = np.diag(row_sum_diag_inv)
-    return np.dot(row_sum_inv, features)
+	def _split_data(self, num_nodes, test_split = 3, val_split = 6):
+		rand_indices = np.random.permutation(num_nodes)
 
+		test_size = num_nodes // test_split
+		val_size = num_nodes // val_split
+		train_size = num_nodes - (test_size + val_size)
 
-def sample_mask(idx, l):
-    mask = np.zeros(l)
-    mask[idx] = 1
-    return np.array(mask, dtype=np.bool)
+		test_indexs = rand_indices[:test_size]
+		val_indexs = rand_indices[test_size:(test_size+val_size)]
+		train_indexs = rand_indices[(test_size+val_size):]
+		
+		return test_indexs, val_indexs, train_indexs
 
-
-def load_data(dataset):
-    ## get data
-    data_path = 'data'
-    suffixs = ['x', 'y', 'allx', 'ally', 'tx', 'ty', 'graph']
-    objects = []
-    for suffix in suffixs:
-        file = os.path.join(data_path, 'ind.%s.%s'%(dataset, suffix))
-        objects.append(pickle.load(open(file, 'rb'), encoding='latin1'))
-    x, y, allx, ally, tx, ty, graph = objects
-    x, allx, tx = x.toarray(), allx.toarray(), tx.toarray()
-
-    # test indices
-    test_index_file = os.path.join(data_path, 'ind.%s.test.index'%dataset)
-    with open(test_index_file, 'r') as f:
-        lines = f.readlines()
-    indices = [int(line.strip()) for line in lines]
-    min_index, max_index = min(indices), max(indices)
-
-    # preprocess test indices and combine all data
-    tx_extend = np.zeros((max_index - min_index + 1, tx.shape[1]))
-    features = np.vstack([allx, tx_extend])
-    features[indices] = tx
-    ty_extend = np.zeros((max_index - min_index + 1, ty.shape[1]))
-    labels = np.vstack([ally, ty_extend])
-    labels[indices] = ty
-
-    # get adjacency matrix
-    adj = nx.adjacency_matrix(nx.from_dict_of_lists(graph)).toarray()
-
-    idx_train = range(len(y))
-    idx_val = range(len(y), len(y) + 500)
-    idx_test = indices
-
-    train_mask = sample_mask(idx_train, labels.shape[0])
-    val_mask = sample_mask(idx_val, labels.shape[0])
-    test_mask = sample_mask(idx_test, labels.shape[0])
-    zeros = np.zeros(labels.shape)
-    y_train = zeros.copy()
-    y_val = zeros.copy()
-    y_test = zeros.copy()
-    y_train[train_mask, :] = labels[train_mask, :]
-    y_val[val_mask, :] = labels[val_mask, :]
-    y_test[test_mask, :] = labels[test_mask, :]
-    features = torch.from_numpy(process_features(features))
-    y_train, y_val, y_test, train_mask, val_mask, test_mask = \
-        torch.from_numpy(y_train), torch.from_numpy(y_val), torch.from_numpy(y_test), \
-        torch.from_numpy(train_mask), torch.from_numpy(val_mask), torch.from_numpy(test_mask)
-
-    return adj, features, y_train, y_val, y_test, train_mask, val_mask, test_mask

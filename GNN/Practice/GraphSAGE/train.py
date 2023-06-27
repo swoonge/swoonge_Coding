@@ -1,60 +1,76 @@
-import argparse
+import sys
 import os
 import torch
-from datasets import load_data
-from models.gcn import GCN
-from models.utils import build_optimizer, get_loss, get_accuracy
-from tensorboardX import SummaryWriter
+import argparse
+import pyhocon
+import random
 
+from src.dataCenter import *
+from src.utils import *
+from src.models import *
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', type=str, default='citeseer', help='Dataset to train')
-parser.add_argument('--init_lr', type=float, default=0.01, help='Initial learing rate')
-parser.add_argument('--epoches', type=int, default=200, help='Number of traing epoches')
-parser.add_argument('--hidden_dim', type=list, default=16, help='Dimensions of hidden layers')
-parser.add_argument('--dropout', type=float, default=0.5, help='Dropout rate (1 - keep  probability)')
-parser.add_argument('--weight_decay', type=float, default=5e-4, help='Weight for l2 loss on embedding matrix')
-parser.add_argument('--log_interval', type=int, default=10, help='Print iterval')
-parser.add_argument('--log_dir', type=str, default='experiments', help='Train/val loss and accuracy logs')
-parser.add_argument('--checkpoint_interval', type=int, default=20, help='Checkpoint saved interval')
-parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
+parser = argparse.ArgumentParser(description='pytorch version of GraphSAGE')
+
+parser.add_argument('--dataSet', type=str, default='cora')
+parser.add_argument('--agg_func', type=str, default='MEAN')
+parser.add_argument('--epochs', type=int, default=50)
+parser.add_argument('--b_sz', type=int, default=20)
+parser.add_argument('--seed', type=int, default=824)
+parser.add_argument('--cuda', action='store_true',
+					help='use CUDA')
+parser.add_argument('--gcn', action='store_true')
+parser.add_argument('--learn_method', type=str, default='sup')
+parser.add_argument('--unsup_loss', type=str, default='normal')
+parser.add_argument('--max_vali_f1', type=float, default=0)
+parser.add_argument('--name', type=str, default='debug')
+parser.add_argument('--config', type=str, default='./src/experiments.conf')
 args = parser.parse_args()
 
+if torch.cuda.is_available():
+	if not args.cuda:
+		print("WARNING: You have a CUDA device, so you should probably run with --cuda")
+	else:
+		device_id = torch.cuda.current_device()
+		print('using device', device_id, torch.cuda.get_device_name(device_id))
 
-adj, features, y_train, y_val, y_test, train_mask, val_mask, test_mask = load_data(args.dataset)
-model = GCN(features.shape[1], args.hidden_dim, y_train.shape[1], args.dropout)
-optimizer = build_optimizer(model, args.init_lr, args.weight_decay)
-
-
-def train():
-    log_dir = os.path.join(args.log_dir, args.dataset)
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-    writer = SummaryWriter(log_dir)
-    saved_checkpoint_dir = os.path.join(args.checkpoint_dir, args.dataset)
-    if not os.path.exists(saved_checkpoint_dir):
-        os.makedirs(saved_checkpoint_dir)
-    for epoch in range(args.epoches + 1):
-        outputs = model(adj, features)
-        loss = get_loss(outputs, y_train, train_mask)
-        val_loss = get_loss(outputs, y_val, val_mask).detach().numpy()
-        model.eval()
-        outputs = model(adj, features)
-        train_accuracy = get_accuracy(outputs, y_train, train_mask)
-        val_accuracy = get_accuracy(outputs, y_val, val_mask)
-        model.train()
-        writer.add_scalars('loss', {'train_loss': loss.detach().numpy(), 'val_loss': val_loss}, epoch)
-        writer.add_scalars('accuracy', {'train_ac': train_accuracy, 'val_ac': val_accuracy}, epoch)
-        if epoch % args.log_interval == 0:
-            print("Epoch: %d, train loss: %f, val loss: %f, train ac: %f, val ac: %f"
-                  %(epoch, loss.detach().numpy(), val_loss, train_accuracy, val_accuracy))
-        if epoch % args.checkpoint_interval == 0:
-            torch.save(model.state_dict(), os.path.join(saved_checkpoint_dir, "gcn_%d.pth"%epoch))
-        optimizer.zero_grad()  # Important
-        loss.backward()
-        optimizer.step()
-    writer.close()
-
+device = torch.device("cuda" if args.cuda else "cpu")
+print('DEVICE:', device)
 
 if __name__ == '__main__':
-    train()
+	random.seed(args.seed)
+	np.random.seed(args.seed)
+	torch.manual_seed(args.seed)
+	torch.cuda.manual_seed_all(args.seed)
+
+	# load config file
+	config = pyhocon.ConfigFactory.parse_file(args.config)
+
+	# load data
+	ds = args.dataSet
+	dataCenter = DataCenter(config)
+	dataCenter.load_dataSet(ds)
+	features = torch.FloatTensor(getattr(dataCenter, ds+'_feats')).to(device)
+
+	graphSage = GraphSage(config['setting.num_layers'], features.size(1), config['setting.hidden_emb_size'], features, getattr(dataCenter, ds+'_adj_lists'), device, gcn=args.gcn, agg_func=args.agg_func)
+	graphSage.to(device)
+
+	num_labels = len(set(getattr(dataCenter, ds+'_labels')))
+	classification = Classification(config['setting.hidden_emb_size'], num_labels)
+	classification.to(device)
+
+	unsupervised_loss = UnsupervisedLoss(getattr(dataCenter, ds+'_adj_lists'), getattr(dataCenter, ds+'_train'), device)
+
+	if args.learn_method == 'sup':
+		print('GraphSage with Supervised Learning')
+	elif args.learn_method == 'plus_unsup':
+		print('GraphSage with Supervised Learning plus Net Unsupervised Learning')
+	else:
+		print('GraphSage with Net Unsupervised Learning')
+
+	for epoch in range(args.epochs):
+		print('----------------------EPOCH %d-----------------------' % epoch)
+		graphSage, classification = apply_model(dataCenter, ds, graphSage, classification, unsupervised_loss, args.b_sz, args.unsup_loss, device, args.learn_method)
+		if (epoch+1) % 2 == 0 and args.learn_method == 'unsup':
+			classification, args.max_vali_f1 = train_classification(dataCenter, graphSage, classification, ds, device, args.max_vali_f1, args.name)
+		if args.learn_method != 'unsup':
+			args.max_vali_f1 = evaluate(dataCenter, ds, graphSage, classification, device, args.max_vali_f1, args.name, epoch)

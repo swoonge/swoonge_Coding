@@ -2,7 +2,7 @@ import argparse
 import torch
 import numpy as np
 from datasets import load_data
-from models.gcn import GCN
+from GNN.Practice.GraphSAGE.models.graphSAGE import GCN
 from misc.tsne_vis import tsne_vis
 
 
