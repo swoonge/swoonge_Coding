@@ -16,12 +16,12 @@ def process_features(features):
 def sample_mask(idx, l):
     mask = np.zeros(l)
     mask[idx] = 1
-    return np.array(mask, dtype=np.bool)
+    return np.array(mask, dtype=bool)
 
 
-def load_data(dataset):
+def load_data(data_path, dataset):
     ## get data
-    data_path = 'data'
+    # data_path = 'data'
     suffixs = ['x', 'y', 'allx', 'ally', 'tx', 'ty', 'graph']
     objects = []
     for suffix in suffixs:

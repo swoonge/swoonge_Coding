@@ -31,9 +31,11 @@ def train():
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
     writer = SummaryWriter(log_dir)
+
     saved_checkpoint_dir = os.path.join(args.checkpoint_dir, args.dataset)
     if not os.path.exists(saved_checkpoint_dir):
         os.makedirs(saved_checkpoint_dir)
+        
     for epoch in range(args.epoches + 1):
         outputs = model(adj, features)
         loss = get_loss(outputs, y_train, train_mask)
